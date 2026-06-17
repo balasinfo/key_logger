@@ -55,8 +55,14 @@ Run a single logical test by editing/commenting checks in `Tests/run.swift`; und
 
 ## Email notifications (Resend)
 
-`track` sends an **hourly** report plus a **daily summary** (fired once when the local calendar
-day rolls over, covering the day that just ended). `notify` sends one on demand:
+`track` sends a periodic report (**default: every 2 hours, only within a 9 AM–9 PM local
+window**, covering the trailing period), plus a **daily summary** (fired once when the local
+calendar day rolls over, covering the day that just ended). Both — and `notify` — carry a
+**Browsing history** section listing every site visited in the period (from on-disk browser
+history; sites uncapped, the per-page list capped at `EmailReporter.maxEmailPages`). The cadence
+and window are configurable via env (`EMAIL_EVERY_HOURS`, `EMAIL_WINDOW="START-END"` 24h hours or
+`"all"`), parsed into `emailPeriod` + `emailWindow` + `inEmailWindow` in `main.swift`; outside the
+window the periodic send is skipped without advancing, so it fires when the window next opens. `notify` sends one on demand:
 `notify --hours N` for the trailing N hours, `notify --daily` for today so far. All go through
 the Resend HTTP API (`EmailReporter`). Configuration is environment-only — the API key is never
 written to disk:
@@ -65,15 +71,21 @@ written to disk:
 export RESEND_API_KEY=re_xxxxxxxx           # required; without it email is silently disabled
 export RESEND_FROM=onboarding@resend.dev    # optional (this default works only in test mode)
 export RESEND_TO=dharamarao.bala@manabadi.siliconandhra.org   # optional; this is the built-in default
+export EMAIL_EVERY_HOURS=2                   # optional; periodic cadence in hours (default 2)
+export EMAIL_WINDOW=9-21                      # optional; local-hour send window (default 9-21; "all" = 24/7)
 ```
+
+NOTE: the Resend account here is owned by the **manabadi** address, so `onboarding@resend.dev`
+delivers to that address (not the gmail). Verified live: `notify --hours 2` and `notify --daily`
+both returned 200 and delivered.
 
 Deliverability caveat: `onboarding@resend.dev` is Resend's shared test sender and will only
 deliver to the **email address that owns the Resend account**. To send to an arbitrary address
 (e.g. the manabadi one), verify a domain in Resend and set `RESEND_FROM` to an address on it.
 
 Scheduling options (pick one):
-- Leave `track` running — it self-schedules the hourly send (`emailPeriod` in `main.swift`).
-- Or run `notify` from `launchd`/`cron` every hour while a separate `track` collects data.
+- Leave `track` running — it self-schedules the periodic send (`emailPeriod`/`emailWindow`).
+- Or run `notify` from `launchd`/`cron` on your own cadence while a separate `track` collects data.
 
 The send path is verified against the live API in this repo's history (an invalid key returns a
 parsed `401`); `EmailReporter.html(...)` is pure and covered by the test suite. Tests never make
@@ -114,16 +126,31 @@ Sampler ──reads──> ActivityContext ──> Classifier ──> ActivitySa
   well-spent / neutral / wasted.
 
 - **`ClassificationConfig`** (`ClassificationConfig.swift`) — all rules are *data*
-  (host→category, bundle→category, keyword buckets), with a `.default` set and JSON override
-  at `~/.activitytracker/classification.json`. Tune *what counts as well-spent* here, not in
-  classifier code.
+  (host→category, bundle→category, keyword buckets), with a `.default` set and a JSON override
+  at `~/.activitytracker/classification.json` that is **merged on top of** the defaults
+  (`load` → `merging`): dicts merge key-by-key (override wins on a clash), keyword lists append
+  (deduped), omitted fields keep the default. So the file only lists rules you add/re-point — it
+  can't delete a built-in rule. Tune *what counts as well-spent* here, not in classifier code.
+
+- **`BrowserHistory`** (`BrowserHistory.swift`) — reads the **current user's** on-disk
+  browsing history (Chrome/Safari/Firefox, all profiles) so `report`/`history` can show what
+  sites were actually visited, not just the frontmost tab the poll happened to catch. Copies
+  each history DB (+ `-wal`/`-shm`) to a temp file and opens it **read-only** (never touches the
+  originals, sidesteps the running browser's lock). Strictly scoped: current user only (no
+  cross-user), and private/incognito writes nothing to disk so there's nothing of it to read.
+  Safari's `History.db` needs the terminal to have Full Disk Access; if denied it's reported as
+  a skipped source, not a crash. Per-browser epoch conversions (Chrome=µs since 1601,
+  Safari=s since 2001, Firefox=µs since 1970) are pure and unit-tested. `Reporter.summarizeHistory`
+  classifies each visit and **estimates** per-page time from the gap to the next visit (capped),
+  so history time is labelled "est." — visit counts are exact.
 
 - **`Store`** (`Store.swift`) — SQLite via the system `SQLite3` module (single `samples`
   table at `~/.activitytracker/activity.sqlite`). Local-only; data leaves the machine only via
   explicit `export`. `purge(olderThanDays:)` implements the retention setting.
 
-- **`EmailReporter`** (`EmailReporter.swift`) — renders a `Reporter.Summary` to HTML (pure,
-  testable) and POSTs it to Resend. `Config.fromEnvironment` reads `RESEND_API_KEY`/`RESEND_FROM`/
+- **`EmailReporter`** (`EmailReporter.swift`) — renders a `Reporter.Summary` (plus an optional
+  `Reporter.HistorySummary` for the browsed-sites section) to HTML (pure, testable) and POSTs it
+  to Resend. `Config.fromEnvironment` reads `RESEND_API_KEY`/`RESEND_FROM`/
   `RESEND_TO`; a missing key means email is disabled, not an error. The synchronous `send`
   blocks on `URLSession` via a semaphore (CLI context). Driven from `main.swift`: the `track`
   loop's `onTick` fires the hourly send on each `emailPeriod` boundary and the daily send when
