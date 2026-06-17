@@ -1,0 +1,7 @@
+.build/
+.build-direct/
+*.swiftmodule
+*.dylib
+.DS_Store
+xcuserdata/
+deploy/secrets.env
