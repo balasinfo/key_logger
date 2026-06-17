@@ -33,6 +33,15 @@ check("steam bundle -> games/wasted",
 check("jetbrains -> productive", c.classify(ctx(bundle: "com.jetbrains.intellij")).category == .productive)
 check("unknown -> neutral", c.classify(ctx(bundle: "com.acme.mystery")).quality == .neutral)
 check("host strips www", BrowserInspector.host(of: "https://www.youtube.com/watch?v=abc") == "youtube.com")
+// Expanded default host rules.
+check("gmail -> productive", c.classify(ctx("mail.google.com")).category == .productive)
+check("supabase -> productive", c.classify(ctx("supabase.com")).category == .productive)
+check("leetcode -> educational", c.classify(ctx("leetcode.com")).category == .educational)
+check("nytimes -> news", c.classify(ctx("nytimes.com")).category == .news)
+check("espncricinfo -> sports", c.classify(ctx("espncricinfo.com")).category == .sports)
+check("spotify -> entertainment", c.classify(ctx("spotify.com")).category == .entertainment)
+check("linkedin -> social", c.classify(ctx("linkedin.com")).category == .social)
+check("sh.reddit subdomain -> social", c.classify(ctx("sh.reddit.com")).category == .social)
 
 // Store round-trip + reporter on a throwaway DB.
 do {
@@ -61,6 +70,70 @@ do {
     try? FileManager.default.removeItem(at: tmp)
 } catch {
     check("store round-trip threw: \(error)", false)
+}
+
+// Config override merges onto defaults (adds/re-points rules; keeps the rest).
+do {
+    let tmp = URL(fileURLWithPath: "/tmp/at_cfg_\(UUID().uuidString).json")
+    let json = """
+    {"hostCategories": {"alerter.online": "productive", "youtube.com": "educational"},
+     "educationalKeywords": ["my-custom-keyword"]}
+    """
+    try json.write(to: tmp, atomically: true, encoding: .utf8)
+    let merged = ClassificationConfig.load(from: tmp)
+    let mc = Classifier(config: merged)
+    check("merge adds new host", mc.classify(ctx("alerter.online")).category == .productive)
+    check("merge re-points existing host", merged.hostCategories["youtube.com"] == .educational)
+    check("merge keeps default hosts", mc.classify(ctx("github.com")).category == .productive)
+    check("merge appends keywords", merged.educationalKeywords.contains("my-custom-keyword"))
+    check("merge keeps default keywords", merged.educationalKeywords.contains("lecture"))
+    check("missing file falls back to defaults",
+          ClassificationConfig.load(from: URL(fileURLWithPath: "/tmp/nope_\(UUID().uuidString).json")).hostCategories["github.com"] == .productive)
+    try? FileManager.default.removeItem(at: tmp)
+}
+
+// Browser-history epoch conversions are pure — round-trip them against a known instant.
+do {
+    let ref = Date(timeIntervalSince1970: 1_700_000_000)
+    check("chrome time round-trips",
+          abs(BrowserHistory.fromChromeTime(BrowserHistory.toChromeTime(ref)).timeIntervalSince(ref)) < 0.001)
+    check("safari time round-trips",
+          abs(BrowserHistory.fromSafariTime(BrowserHistory.toSafariTime(ref)).timeIntervalSince(ref)) < 0.001)
+    check("firefox time round-trips",
+          abs(BrowserHistory.fromFirefoxTime(BrowserHistory.toFirefoxTime(ref)).timeIntervalSince(ref)) < 0.001)
+    // A real Chrome stamp (13335912345000000 µs since 1601) lands in 2023, not 1601/1970.
+    let y = Calendar(identifier: .gregorian).component(.year,
+                from: BrowserHistory.fromChromeTime(13_335_912_345_000_000))
+    check("chrome epoch offset is sane", y > 2020 && y < 2030)
+}
+
+// History aggregation: dwell estimated from the gap to the next visit, capped.
+do {
+    let base = Date(timeIntervalSince1970: 1_700_000_000)
+    let visits = [
+        HistoryVisit(timestamp: base, url: "https://github.com/x", title: "repo", browser: "Chrome"),
+        HistoryVisit(timestamp: base.addingTimeInterval(60), url: "https://youtube.com/x",
+                     title: "Calculus lecture", browser: "Firefox"),
+        HistoryVisit(timestamp: base.addingTimeInterval(120), url: "https://instagram.com/x",
+                     title: "feed", browser: "Safari"),
+    ]
+    let hs = Reporter(interval: 5).summarizeHistory(visits, classifier: c, tailDwell: 30)
+    check("history counts all visits", hs.totalVisits == 3)
+    check("history github dwell = 60s", hs.topSites.first(where: { $0.host == "github.com" })?.seconds == 60)
+    check("history youtube lecture is educational",
+          hs.byCategory.contains { $0.0 == .educational && $0.1 == 60 })
+    check("history tail dwell applied", hs.estimatedTime == 60 + 60 + 30)
+    check("history groups by browser", hs.byBrowser.count == 3)
+    check("history pages newest first", hs.pages.first?.host == "instagram.com")
+    check("history pages includes all", hs.pages.count == 3)
+
+    // Email HTML includes the browsing-history section when a history summary is passed.
+    let emptySummary = Reporter(interval: 5).summarize([])
+    let withHistory = EmailReporter.html(summary: emptySummary, periodLabel: "last 2 hours", history: hs)
+    check("email shows history heading", withHistory.contains("Browsing history"))
+    check("email lists a browsed site", withHistory.contains("github.com"))
+    check("email omits history when nil",
+          !EmailReporter.html(summary: emptySummary, periodLabel: "last 2 hours").contains("Browsing history"))
 }
 
 print(failures == 0 ? "\nALL PASS" : "\n\(failures) FAILED")

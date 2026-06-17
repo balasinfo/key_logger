@@ -38,9 +38,11 @@ public struct EmailReporter {
     public init(config: Config) { self.config = config }
 
     /// Render + send a summary for the given period. Throws on transport / API error.
-    public func send(summary: Reporter.Summary, periodLabel: String) throws {
+    /// Pass `history` to append the browsed-sites section (from on-disk browser history).
+    public func send(summary: Reporter.Summary, periodLabel: String,
+                     history: Reporter.HistorySummary? = nil) throws {
         let subject = "Activity report — \(periodLabel)"
-        let html = EmailReporter.html(summary: summary, periodLabel: periodLabel)
+        let html = EmailReporter.html(summary: summary, periodLabel: periodLabel, history: history)
         try send(subject: subject, html: html)
     }
 
@@ -78,12 +80,13 @@ public struct EmailReporter {
         try result.get()
     }
 
+    /// Cap on the per-page list in the email; the unique-site list is never capped (that's the
+    /// "all browsed sites" the report is for). Daily reports can have a lot of individual hits.
+    static let maxEmailPages = 250
+
     /// Pure HTML renderer — no network, so it is unit-testable.
-    public static func html(summary: Reporter.Summary, periodLabel: String) -> String {
-        func row(_ label: String, _ secs: TimeInterval, _ color: String = "#333") -> String {
-            "<tr><td style=\"padding:4px 12px 4px 0;color:\(color)\">\(esc(label))</td>"
-            + "<td style=\"padding:4px 0;text-align:right\">\(Reporter.format(secs))</td></tr>"
-        }
+    public static func html(summary: Reporter.Summary, periodLabel: String,
+                            history: Reporter.HistorySummary? = nil) -> String {
         let qualityColor: [Quality: String] = [.wellSpent: "#2e7d32", .neutral: "#888", .wasted: "#c62828"]
 
         let qualityRows = summary.byQuality
@@ -106,10 +109,53 @@ public struct EmailReporter {
           <table style="border-collapse:collapse;width:100%">\(categoryRows)</table>
           <h3 style="margin:16px 0 4px">Top activities</h3>
           <table style="border-collapse:collapse;width:100%">\(activityRows)</table>
+          \(historySection(history))
           <p style="color:#aaa;font-size:12px;margin-top:20px">
             Sent by activitytracker. Window/app/site metadata only — no keystrokes captured.</p>
         </div>
         """
+    }
+
+    /// The "Browsing history" block: every site visited in the period (uncapped), plus the page
+    /// list (capped at `maxEmailPages`). Returns "" when there's no history to show.
+    private static func historySection(_ history: Reporter.HistorySummary?) -> String {
+        guard let h = history, h.totalVisits > 0 else { return "" }
+
+        let byBrowser = h.byBrowser.map { "\(esc($0.0)) \($0.1)" }.joined(separator: " · ")
+        let categoryRows = h.byCategory.map { row($0.0.rawValue, $0.1) }.joined()
+        let siteRows = h.topSites.map {
+            "<tr><td style=\"padding:3px 12px 3px 0\">\(esc($0.host)) "
+            + "<span style=\"color:#999\">[\(esc($0.category.rawValue))] · \($0.visits)×</span></td>"
+            + "<td style=\"padding:3px 0;text-align:right\">\(Reporter.format($0.seconds))</td></tr>"
+        }.joined()
+
+        let clock = DateFormatter(); clock.dateFormat = "MMM d HH:mm"
+        let shown = h.pages.prefix(maxEmailPages)
+        let pageRows = shown.map {
+            "<tr><td style=\"padding:2px 8px 2px 0;color:#999;white-space:nowrap\">\(clock.string(from: $0.timestamp))</td>"
+            + "<td style=\"padding:2px 0\">\(esc($0.label)) "
+            + "<span style=\"color:#999\">[\(esc($0.category.rawValue))] \(esc($0.host))</span></td></tr>"
+        }.joined()
+        let more = h.pages.count > maxEmailPages
+            ? "<p style=\"color:#999;font-size:12px\">…and \(h.pages.count - maxEmailPages) more pages</p>"
+            : ""
+
+        return """
+        <h3 style="margin:24px 0 4px">Browsing history (all sites)</h3>
+        <p style="color:#666;margin:0 0 8px">\(h.totalVisits) pages · est. \(Reporter.format(h.estimatedTime)) · \(byBrowser)</p>
+        <h4 style="margin:12px 0 4px;color:#555">By category (est. time)</h4>
+        <table style="border-collapse:collapse;width:100%">\(categoryRows)</table>
+        <h4 style="margin:16px 0 4px;color:#555">Sites visited</h4>
+        <table style="border-collapse:collapse;width:100%">\(siteRows)</table>
+        <h4 style="margin:16px 0 4px;color:#555">Pages</h4>
+        <table style="border-collapse:collapse;width:100%">\(pageRows)</table>
+        \(more)
+        """
+    }
+
+    private static func row(_ label: String, _ secs: TimeInterval, _ color: String = "#333") -> String {
+        "<tr><td style=\"padding:4px 12px 4px 0;color:\(color)\">\(esc(label))</td>"
+        + "<td style=\"padding:4px 0;text-align:right\">\(Reporter.format(secs))</td></tr>"
     }
 
     private static func esc(_ s: String) -> String {
