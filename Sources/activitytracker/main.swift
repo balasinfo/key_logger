@@ -157,7 +157,7 @@ do {
     switch command {
     case "track":
         let store = try Store()
-        print("Tracking every \(Int(interval))s. Data: \(store.path.path)")
+        print("Tracking every \(Int(interval))s on \(Machine.name). Data: \(store.path.path)")
         print("This machine is being monitored for activity (apps, websites, video/game titles).")
 
         // Email, if configured: an hourly report plus a daily summary at local midnight.
@@ -237,6 +237,7 @@ do {
     case "report":
         let store = try Store()
         let summary = reporter.summarize(try store.samples(since: sinceDate()))
+        print("Machine: \(Machine.name)")
         print("Total tracked: \(Reporter.format(summary.total))\n")
         print("By time quality:")
         for (q, secs) in summary.byQuality {

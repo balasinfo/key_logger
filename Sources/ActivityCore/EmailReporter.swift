@@ -39,10 +39,14 @@ public struct EmailReporter {
 
     /// Render + send a summary for the given period. Throws on transport / API error.
     /// Pass `history` to append the browsed-sites section (from on-disk browser history).
+    /// `host` (defaults to this machine's name) is shown in the subject and body so reports
+    /// from multiple machines aren't indistinguishable in the same inbox.
     public func send(summary: Reporter.Summary, periodLabel: String,
-                     history: Reporter.HistorySummary? = nil) throws {
-        let subject = "Activity report — \(periodLabel)"
-        let html = EmailReporter.html(summary: summary, periodLabel: periodLabel, history: history)
+                     history: Reporter.HistorySummary? = nil,
+                     host: String = Machine.name) throws {
+        let subject = "Activity report [\(host)] — \(periodLabel)"
+        let html = EmailReporter.html(summary: summary, periodLabel: periodLabel,
+                                      history: history, host: host)
         try send(subject: subject, html: html)
     }
 
@@ -84,9 +88,11 @@ public struct EmailReporter {
     /// "all browsed sites" the report is for). Daily reports can have a lot of individual hits.
     static let maxEmailPages = 250
 
-    /// Pure HTML renderer — no network, so it is unit-testable.
+    /// Pure HTML renderer — no network, so it is unit-testable. `host`, when given, is shown
+    /// next to the title so the machine a report came from is visible in the body too.
     public static func html(summary: Reporter.Summary, periodLabel: String,
-                            history: Reporter.HistorySummary? = nil) -> String {
+                            history: Reporter.HistorySummary? = nil,
+                            host: String? = nil) -> String {
         let qualityColor: [Quality: String] = [.wellSpent: "#2e7d32", .neutral: "#888", .wasted: "#c62828"]
 
         let qualityRows = summary.byQuality
@@ -99,9 +105,11 @@ public struct EmailReporter {
                  + "<td style=\"padding:4px 0;text-align:right\">\(Reporter.format($0.seconds))</td></tr>" }
             .joined()
 
+        let hostTitle = host.map { " <span style=\"color:#888;font-weight:normal\">— \(esc($0))</span>" } ?? ""
+
         return """
         <div style="font-family:-apple-system,Helvetica,Arial,sans-serif;max-width:560px">
-          <h2 style="margin:0 0 4px">Activity report</h2>
+          <h2 style="margin:0 0 4px">Activity report\(hostTitle)</h2>
           <p style="color:#666;margin:0 0 16px">\(esc(periodLabel)) · total tracked \(Reporter.format(summary.total))</p>
           <h3 style="margin:16px 0 4px">Time quality</h3>
           <table style="border-collapse:collapse;width:100%">\(qualityRows)</table>
